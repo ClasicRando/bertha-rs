@@ -1,15 +1,15 @@
 use derive_builder::Builder;
-use serde::{Deserialize, Deserializer, Serialize};
-use std::fmt::Formatter;
 use serde::de::Error;
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::json;
-use sqlx::postgres::PgRow;
 use sqlx::Row;
+use sqlx::postgres::PgRow;
+use std::fmt::Formatter;
 use time::{Duration, PrimitiveDateTime};
 
 macro_rules! uuid_v7_type {
     ($typ:ident) => {
-        #[derive(::serde::Serialize, ::serde::Deserialize)]
+        #[derive(::serde::Serialize, ::serde::Deserialize, ::core::clone::Clone)]
         pub struct $typ(::uuid::Uuid);
 
         impl ::core::default::Default for $typ {
@@ -281,9 +281,9 @@ impl<'r> sqlx::FromRow<'r, PgRow> for Task {
                     source: format!(
                         "Could not decode retry_strategy ({retry_strategy}) in task = {task_id}"
                     )
-                        .into(),
-                })
-            }
+                    .into(),
+                });
+            },
         };
         let timeout: i32 = row.try_get("timeout")?;
         let worker_heartbeat_timeout: i32 = row.try_get("worker_heartbeat_timeout")?;
@@ -346,17 +346,19 @@ pub enum WorkflowRunStatus {
 
 fn deserialize_input_data<'de, D>(deserializer: D) -> Result<serde_json::Value, D::Error>
 where
-    D: Deserializer<'de>
+    D: Deserializer<'de>,
 {
     let Some(value) = Option::<serde_json::Value>::deserialize(deserializer)? else {
-        return Ok(json!({}))
+        return Ok(json!({}));
     };
 
     if matches!(value, serde_json::Value::Object(_)) {
-        return Ok(value)
+        return Ok(value);
     }
 
-    Err(Error::custom(format!("input_data must be an object. Found {value}")))
+    Err(Error::custom(format!(
+        "input_data must be an object. Found {value}"
+    )))
 }
 
 fn default_input_data() -> serde_json::Value {
@@ -508,4 +510,130 @@ pub enum WorkflowRunTaskStatus {
     Scheduled = 1,
     Running = 2,
     Completed = 3,
+}
+
+uuid_v7_type!(WorkerId);
+
+pub struct TaskResult {
+    run_id: WorkflowRunId,
+    task_order: u32,
+    status: TaskResultStatus,
+}
+
+impl TaskResult {
+    fn new(workflow_run_task: &WorkflowRunTask, status: TaskResultStatus) -> Self {
+        Self {
+            run_id: workflow_run_task.run_id.clone(),
+            task_order: workflow_run_task.task_order,
+            status,
+        }
+    }
+
+    /// Create a new [TaskResult] with a [TaskResultStatus::InProgress] status. This includes no
+    /// progress update to the dispatcher node.
+    pub fn in_progress(workflow_run_task: &WorkflowRunTask, worker_id: WorkerId) -> Self {
+        Self::new(
+            workflow_run_task,
+            TaskResultStatus::InProgress {
+                worker_id,
+                percent_completed: None,
+            },
+        )
+    }
+
+    /// Create a new [TaskResult] with a [TaskResultStatus::InProgress] status. This requires a
+    /// progress update to the dispatcher node.
+    pub fn progress_update(
+        workflow_run_task: &WorkflowRunTask,
+        worker_id: WorkerId,
+        percent_completed: u8,
+    ) -> Self {
+        Self::new(
+            workflow_run_task,
+            TaskResultStatus::InProgress {
+                worker_id,
+                percent_completed: Some(percent_completed),
+            },
+        )
+    }
+
+    /// Create a new [TaskResult] with a [TaskResultStatus::Failed] status. Provides an error
+    /// message to describe why the task failed.
+    pub fn failed(workflow_run_task: WorkflowRunTask, error_message: String) -> Self {
+        Self::new(
+            &workflow_run_task,
+            TaskResultStatus::Failed { error_message },
+        )
+    }
+    
+    /// Create a new [TaskResult] with a [TaskResultStatus::Failed] status. Provides a
+    /// [std::error::Error] type as the failure cause. This will be converted to a string.
+    pub fn error<E: std::error::Error>(workflow_run_task: WorkflowRunTask, error: E) -> Self {
+        Self::new(
+            &workflow_run_task,
+            TaskResultStatus::Failed {
+                error_message: error.to_string(),
+            },
+        )
+    }
+
+    /// Create a new [TaskResult] with a [TaskResultStatus::Completed] status. General constructor
+    /// where both output fields are optional.
+    pub fn completed(
+        workflow_run_task: WorkflowRunTask,
+        output_message: Option<String>,
+        output_data: Option<serde_json::Value>,
+    ) -> Self {
+        Self::new(
+            &workflow_run_task,
+            TaskResultStatus::Completed {
+                output_message,
+                output_data,
+            },
+        )
+    }
+
+    /// Create a new [TaskResult] with a [TaskResultStatus::Completed] status. Specialized
+    /// constructor for results that only contain an output message and no output date.
+    pub fn completed_with_message(
+        workflow_run_task: WorkflowRunTask,
+        output_message: String,
+    ) -> Self {
+        Self::completed(workflow_run_task, Some(output_message), None)
+    }
+
+    /// Create a new [TaskResult] with a [TaskResultStatus::Completed] status. Specialized
+    /// constructor for results that only contain output data and no output message.
+    pub fn completed_with_data(
+        workflow_run_task: WorkflowRunTask,
+        output_data: serde_json::Value,
+    ) -> Self {
+        Self::completed(workflow_run_task, None, Some(output_data))
+    }
+
+    pub fn run_id(&self) -> &WorkflowRunId {
+        &self.run_id
+    }
+
+    pub fn task_order(&self) -> u32 {
+        self.task_order
+    }
+
+    pub fn status(&self) -> &TaskResultStatus {
+        &self.status
+    }
+}
+
+pub enum TaskResultStatus {
+    InProgress {
+        worker_id: WorkerId,
+        percent_completed: Option<u8>,
+    },
+    Failed {
+        error_message: String,
+    },
+    Completed {
+        output_message: Option<String>,
+        output_data: Option<serde_json::Value>,
+    },
 }
