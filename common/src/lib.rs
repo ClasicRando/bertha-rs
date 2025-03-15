@@ -9,7 +9,15 @@ use time::{Duration, PrimitiveDateTime};
 
 macro_rules! uuid_v7_type {
     ($typ:ident) => {
-        #[derive(::serde::Serialize, ::serde::Deserialize, ::core::clone::Clone)]
+        #[derive(
+            ::serde::Serialize,
+            ::serde::Deserialize,
+            ::core::clone::Clone,
+            ::core::fmt::Debug,
+            ::std::cmp::PartialEq,
+            ::std::cmp::Eq,
+            ::std::hash::Hash
+        )]
         pub struct $typ(::uuid::Uuid);
 
         impl ::core::default::Default for $typ {
@@ -463,11 +471,12 @@ impl WorkflowRun {
     }
 }
 
-#[derive(Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Serialize, Deserialize, sqlx::FromRow, Debug)]
 pub struct WorkflowRunTask {
     run_id: WorkflowRunId,
     #[sqlx(try_from = "i32")]
     task_order: u32,
+    task_id: TaskId,
     input_data: Option<serde_json::Value>,
     output_data: Option<serde_json::Value>,
     task_status: WorkflowRunTaskStatus,
@@ -482,6 +491,11 @@ impl WorkflowRunTask {
     #[inline]
     pub fn task_order(&self) -> u32 {
         self.task_order
+    }
+
+    #[inline]
+    pub fn task_id(&self) -> &TaskId {
+        &self.task_id
     }
 
     #[inline]
@@ -500,7 +514,7 @@ impl WorkflowRunTask {
     }
 }
 
-#[derive(sqlx::Type, Serialize, Deserialize, Clone, PartialEq, Copy)]
+#[derive(sqlx::Type, Serialize, Deserialize, Clone, PartialEq, Copy, Debug)]
 #[repr(i16)]
 pub enum WorkflowRunTaskStatus {
     Canceled = -3,
@@ -514,6 +528,7 @@ pub enum WorkflowRunTaskStatus {
 
 uuid_v7_type!(WorkerId);
 
+#[derive(Serialize, Deserialize, Debug)]
 pub struct TaskResult {
     run_id: WorkflowRunId,
     task_order: u32,
@@ -527,34 +542,6 @@ impl TaskResult {
             task_order: workflow_run_task.task_order,
             status,
         }
-    }
-
-    /// Create a new [TaskResult] with a [TaskResultStatus::InProgress] status. This includes no
-    /// progress update to the dispatcher node.
-    pub fn in_progress(workflow_run_task: &WorkflowRunTask, worker_id: WorkerId) -> Self {
-        Self::new(
-            workflow_run_task,
-            TaskResultStatus::InProgress {
-                worker_id,
-                percent_completed: None,
-            },
-        )
-    }
-
-    /// Create a new [TaskResult] with a [TaskResultStatus::InProgress] status. This requires a
-    /// progress update to the dispatcher node.
-    pub fn progress_update(
-        workflow_run_task: &WorkflowRunTask,
-        worker_id: WorkerId,
-        percent_completed: u8,
-    ) -> Self {
-        Self::new(
-            workflow_run_task,
-            TaskResultStatus::InProgress {
-                worker_id,
-                percent_completed: Some(percent_completed),
-            },
-        )
     }
 
     /// Create a new [TaskResult] with a [TaskResultStatus::Failed] status. Provides an error
@@ -624,11 +611,8 @@ impl TaskResult {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug)]
 pub enum TaskResultStatus {
-    InProgress {
-        worker_id: WorkerId,
-        percent_completed: Option<u8>,
-    },
     Failed {
         error_message: String,
     },
@@ -636,4 +620,48 @@ pub enum TaskResultStatus {
         output_message: Option<String>,
         output_data: Option<serde_json::Value>,
     },
+}
+
+/// Percentage progress through a given task. Although the internal value is a `u8`, the actual
+/// value is always between 0 and 100.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TaskProgressUpdate {
+    run_id: WorkflowRunId,
+    task_order: u32,
+    progress: u8,
+}
+
+impl TaskProgressUpdate {
+    /// Create a [TaskProgressUpdate] for the specified [WorkflowRunTask] with the new `progress`
+    /// completed value. Any progress supplied over 100 will be clamped to that maximum before
+    /// returning the new value.
+    pub fn new(workflow_run_task: &WorkflowRunTask, progress: u8) -> Self {
+        Self {
+            run_id: workflow_run_task.run_id.clone(),
+            task_order: workflow_run_task.task_order,
+            progress,
+        }
+    }
+
+    pub fn run_id(&self) -> &WorkflowRunId {
+        &self.run_id
+    }
+
+    pub fn task_order(&self) -> u32 {
+        self.task_order
+    }
+    
+    /// Return the progress completed percentage. Value is always between 0 and 100. 
+    pub fn progress(&self) -> u8 {
+        self.progress
+    }
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub enum WsMessage {
+    Start(Vec<TaskId>),
+    Run(WorkflowRunTask),
+    Update(TaskProgressUpdate),
+    Result(TaskResult),
+    Close,
 }

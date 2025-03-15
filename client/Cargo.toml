@@ -5,5 +5,9 @@ edition = "2024"
 
 [dependencies]
 common = { path = "../common" }
-async-trait = "0.1.87"
 uuid = { workspace = true }
+tokio-tungstenite = "0.26.2"
+tokio = { workspace = true }
+futures-util = "0.3.31"
+rmp-serde = { workspace = true }
+serde = { workspace = true }
