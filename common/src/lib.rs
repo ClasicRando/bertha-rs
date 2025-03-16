@@ -471,7 +471,7 @@ impl WorkflowRun {
     }
 }
 
-#[derive(Serialize, Deserialize, sqlx::FromRow, Debug)]
+#[derive(Serialize, Deserialize, sqlx::FromRow, Debug, Clone)]
 pub struct WorkflowRunTask {
     run_id: WorkflowRunId,
     #[sqlx(try_from = "i32")]
@@ -536,19 +536,31 @@ pub struct TaskResult {
 }
 
 impl TaskResult {
-    fn new(workflow_run_task: &WorkflowRunTask, status: TaskResultStatus) -> Self {
+    fn new(run_id: WorkflowRunId, task_order: u32, status: TaskResultStatus) -> Self {
         Self {
-            run_id: workflow_run_task.run_id.clone(),
-            task_order: workflow_run_task.task_order,
+            run_id,
+            task_order,
             status,
         }
+    }
+
+    fn from_task(workflow_run_task: WorkflowRunTask, status: TaskResultStatus) -> Self {
+        Self::new(workflow_run_task.run_id, workflow_run_task.task_order, status)
+    }
+    
+    pub fn accept(workflow_run_task: &WorkflowRunTask) -> Self {
+        Self::new(workflow_run_task.run_id.clone(), workflow_run_task.task_order, TaskResultStatus::Accepted)
+    }
+
+    pub fn reject(workflow_run_task: WorkflowRunTask) -> Self {
+        Self::from_task(workflow_run_task, TaskResultStatus::Accepted)
     }
 
     /// Create a new [TaskResult] with a [TaskResultStatus::Failed] status. Provides an error
     /// message to describe why the task failed.
     pub fn failed(workflow_run_task: WorkflowRunTask, error_message: String) -> Self {
-        Self::new(
-            &workflow_run_task,
+        Self::from_task(
+            workflow_run_task,
             TaskResultStatus::Failed { error_message },
         )
     }
@@ -556,8 +568,8 @@ impl TaskResult {
     /// Create a new [TaskResult] with a [TaskResultStatus::Failed] status. Provides a
     /// [std::error::Error] type as the failure cause. This will be converted to a string.
     pub fn error<E: std::error::Error>(workflow_run_task: WorkflowRunTask, error: E) -> Self {
-        Self::new(
-            &workflow_run_task,
+        Self::from_task(
+            workflow_run_task,
             TaskResultStatus::Failed {
                 error_message: error.to_string(),
             },
@@ -571,8 +583,8 @@ impl TaskResult {
         output_message: Option<String>,
         output_data: Option<serde_json::Value>,
     ) -> Self {
-        Self::new(
-            &workflow_run_task,
+        Self::from_task(
+            workflow_run_task,
             TaskResultStatus::Completed {
                 output_message,
                 output_data,
@@ -613,6 +625,8 @@ impl TaskResult {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum TaskResultStatus {
+    Accepted,
+    Rejected,
     Failed {
         error_message: String,
     },
@@ -658,9 +672,17 @@ impl TaskProgressUpdate {
 }
 
 #[derive(Deserialize, Serialize, Debug)]
-pub enum WsMessage {
-    Start(Vec<TaskId>),
+pub enum WsServerMessage {
     Run(WorkflowRunTask),
+    Close,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub enum WsClientMessage {
+    Start(Vec<TaskId>),
+    Ready(usize),
+    Accept(TaskResult),
+    Reject(TaskResult),
     Update(TaskProgressUpdate),
     Result(TaskResult),
     Close,
