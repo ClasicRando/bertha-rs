@@ -1,17 +1,21 @@
 use common::{
-    TaskId, TaskProgressUpdate, TaskResult, WorkerId, WorkflowRunTask, WsClientMessage,
+    TaskId, TaskResult, WorkerId, WorkflowRunTask, WsClientMessage,
     WsServerMessage,
 };
-use crossbeam::channel::{Receiver, Sender, unbounded};
-use crossbeam::select;
+use crossbeam::{
+    channel::{unbounded, Receiver, Sender, TryRecvError},
+    select,
+};
+use derive_builder::Builder;
 use serde::Serialize;
-use std::collections::HashMap;
-use std::net::TcpStream;
-use std::sync::Arc;
-use std::thread::{JoinHandle, spawn};
-use std::time::Duration;
-use tungstenite::stream::MaybeTlsStream;
-use tungstenite::{Bytes, Message, WebSocket, connect};
+use std::{
+    collections::HashMap,
+    net::TcpStream,
+    sync::Arc,
+    thread::{spawn, JoinHandle},
+    time::Duration,
+};
+use tungstenite::{connect, stream::MaybeTlsStream, Bytes, Message, WebSocket};
 use uuid::Uuid;
 
 const CLEAR_TASK_TIMEOUT: Duration = Duration::from_secs(1);
@@ -128,8 +132,10 @@ fn process_ws_operations(
             continue;
         }
 
-        let Ok(message) = ws_write_receiver.try_recv() else {
-            continue;
+        let message = match ws_write_receiver.try_recv() {
+            Ok(inner) => inner,
+            Err(TryRecvError::Empty) => continue,
+            Err(TryRecvError::Disconnected) => break,
         };
         if let WsClientMessage::Close = message {
             break;
@@ -166,6 +172,8 @@ pub struct WorkerBuilder {
 }
 
 impl WorkerBuilder {
+    /// Add a new [WorkflowTaskRunner] with default configuration. See [WorkflowTaskRunnerConfig]
+    /// for more details of what the default attributes of a runner is
     pub fn add_runner(self, task_id: TaskId, runner: WorkflowTaskRunner) -> Self {
         self.add_runner_with_config(
             task_id,
@@ -176,6 +184,7 @@ impl WorkerBuilder {
         )
     }
 
+    /// Add a new [WorkflowTaskRunner] by supplying a full [WorkflowTaskRunnerConfig]
     pub fn add_runner_with_config(
         mut self,
         task_id: TaskId,
@@ -185,6 +194,7 @@ impl WorkerBuilder {
         self
     }
 
+    /// Terminate a [WorkerBuilder] and return a new [Worker] with the current state of the builder
     pub fn build(self) -> Worker {
         Worker {
             worker_id: WorkerId::from(Uuid::now_v7()),
@@ -193,10 +203,25 @@ impl WorkerBuilder {
     }
 }
 
+/// Type alias for a function point that handles incoming task run requests, returning a
+/// [TaskResult] to describe how the run went. Note this does not use the [Result] type since the
+/// function definer should pack the error details into the result.
 pub type WorkflowTaskRunner = fn(RunningWorker, WorkflowRunTask) -> TaskResult;
 
+/// Client configuration for a [WorkflowTaskRunner]. Contains the runner and it's related
+/// properties. To each the creation of these configs, there is a builder named
+/// [WorkflowTaskRunnerConfigBuilder] that contains default values for some fields.
+/// 
+/// - `task_thread_count`, default = 1
+#[derive(Builder, Debug)]
+#[builder(pattern = "owned")]
 pub struct WorkflowTaskRunnerConfig {
     runner: WorkflowTaskRunner,
+    /// Number of threads that this worker can spawn to handle task run requests. This should be
+    /// proportional to the number of concurrent requests the worker should receive for this task
+    /// and once that limit is reached, new requests sent to this worker will get a response of
+    /// [WsClientMessage::Reject]
+    #[builder(default = "1")]
     task_thread_count: usize,
 }
 
@@ -240,7 +265,7 @@ impl WorkflowTaskExecutor {
                     };
 
                     if self.running_tasks.len() >= self.config.task_thread_count {
-                        let message = WsClientMessage::Reject(TaskResult::reject(task));
+                        let message = WsClientMessage::reject(task);
                         if let Err(error) = self.ws_write_sender.send(message) {
                             println!("{error}");
                             break;
@@ -248,7 +273,7 @@ impl WorkflowTaskExecutor {
                         continue;
                     }
 
-                    let message = WsClientMessage::Accept(TaskResult::accept(&task));
+                    let message = WsClientMessage::accept(&task);
                     let worker = self.config.runner;
                     self.running_tasks.push(spawn(move || worker(running_worker, task)));
                     if let Err(error) = self.ws_write_sender.send(message) {
@@ -329,8 +354,7 @@ impl RunningWorker {
     }
 
     pub fn send_task_progress_update(&self, workflow_run_task: &WorkflowRunTask, progress: u8) {
-        let update = TaskProgressUpdate::new(workflow_run_task, progress);
-        let message = WsClientMessage::Update(update);
+        let message = WsClientMessage::update(workflow_run_task, progress);
         self.send_message(message)
     }
 }

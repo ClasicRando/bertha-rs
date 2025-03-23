@@ -116,6 +116,7 @@ version = "0.1.0"
 dependencies = [
  "common",
  "crossbeam",
+ "derive_builder",
  "rmp-serde",
  "serde",
  "tungstenite",

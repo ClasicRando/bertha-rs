@@ -16,7 +16,7 @@ macro_rules! uuid_v7_type {
             ::core::fmt::Debug,
             ::std::cmp::PartialEq,
             ::std::cmp::Eq,
-            ::std::hash::Hash
+            ::std::hash::Hash,
         )]
         pub struct $typ(::uuid::Uuid);
 
@@ -472,10 +472,16 @@ impl WorkflowRun {
 }
 
 #[derive(Serialize, Deserialize, sqlx::FromRow, Debug, Clone)]
-pub struct WorkflowRunTask {
+pub struct WorkflowRunTaskId {
     run_id: WorkflowRunId,
     #[sqlx(try_from = "i32")]
     task_order: u32,
+}
+
+#[derive(Serialize, Deserialize, sqlx::FromRow, Debug, Clone)]
+pub struct WorkflowRunTask {
+    #[sqlx(flatten)]
+    workflow_run_task_id: WorkflowRunTaskId,
     task_id: TaskId,
     input_data: Option<serde_json::Value>,
     output_data: Option<serde_json::Value>,
@@ -484,13 +490,18 @@ pub struct WorkflowRunTask {
 
 impl WorkflowRunTask {
     #[inline]
+    pub fn workflow_run_task_id(&self) -> &WorkflowRunTaskId {
+        &self.workflow_run_task_id
+    }
+
+    #[inline]
     pub fn run_id(&self) -> &WorkflowRunId {
-        &self.run_id
+        &self.workflow_run_task_id.run_id
     }
 
     #[inline]
     pub fn task_order(&self) -> u32 {
-        self.task_order
+        self.workflow_run_task_id.task_order
     }
 
     #[inline]
@@ -530,30 +541,20 @@ uuid_v7_type!(WorkerId);
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TaskResult {
-    run_id: WorkflowRunId,
-    task_order: u32,
+    workflow_run_task_id: WorkflowRunTaskId,
     status: TaskResultStatus,
 }
 
 impl TaskResult {
-    fn new(run_id: WorkflowRunId, task_order: u32, status: TaskResultStatus) -> Self {
+    fn new(workflow_run_task_id: WorkflowRunTaskId, status: TaskResultStatus) -> Self {
         Self {
-            run_id,
-            task_order,
+            workflow_run_task_id,
             status,
         }
     }
 
     fn from_task(workflow_run_task: WorkflowRunTask, status: TaskResultStatus) -> Self {
-        Self::new(workflow_run_task.run_id, workflow_run_task.task_order, status)
-    }
-    
-    pub fn accept(workflow_run_task: &WorkflowRunTask) -> Self {
-        Self::new(workflow_run_task.run_id.clone(), workflow_run_task.task_order, TaskResultStatus::Accepted)
-    }
-
-    pub fn reject(workflow_run_task: WorkflowRunTask) -> Self {
-        Self::from_task(workflow_run_task, TaskResultStatus::Accepted)
+        Self::new(workflow_run_task.workflow_run_task_id, status)
     }
 
     /// Create a new [TaskResult] with a [TaskResultStatus::Failed] status. Provides an error
@@ -564,7 +565,7 @@ impl TaskResult {
             TaskResultStatus::Failed { error_message },
         )
     }
-    
+
     /// Create a new [TaskResult] with a [TaskResultStatus::Failed] status. Provides a
     /// [std::error::Error] type as the failure cause. This will be converted to a string.
     pub fn error<E: std::error::Error>(workflow_run_task: WorkflowRunTask, error: E) -> Self {
@@ -611,11 +612,11 @@ impl TaskResult {
     }
 
     pub fn run_id(&self) -> &WorkflowRunId {
-        &self.run_id
+        &self.workflow_run_task_id.run_id
     }
 
     pub fn task_order(&self) -> u32 {
-        self.task_order
+        self.workflow_run_task_id.task_order
     }
 
     pub fn status(&self) -> &TaskResultStatus {
@@ -625,8 +626,6 @@ impl TaskResult {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum TaskResultStatus {
-    Accepted,
-    Rejected,
     Failed {
         error_message: String,
     },
@@ -634,41 +633,6 @@ pub enum TaskResultStatus {
         output_message: Option<String>,
         output_data: Option<serde_json::Value>,
     },
-}
-
-/// Percentage progress through a given task. Although the internal value is a `u8`, the actual
-/// value is always between 0 and 100.
-#[derive(Serialize, Deserialize, Debug)]
-pub struct TaskProgressUpdate {
-    run_id: WorkflowRunId,
-    task_order: u32,
-    progress: u8,
-}
-
-impl TaskProgressUpdate {
-    /// Create a [TaskProgressUpdate] for the specified [WorkflowRunTask] with the new `progress`
-    /// completed value. Any progress supplied over 100 will be clamped to that maximum before
-    /// returning the new value.
-    pub fn new(workflow_run_task: &WorkflowRunTask, progress: u8) -> Self {
-        Self {
-            run_id: workflow_run_task.run_id.clone(),
-            task_order: workflow_run_task.task_order,
-            progress,
-        }
-    }
-
-    pub fn run_id(&self) -> &WorkflowRunId {
-        &self.run_id
-    }
-
-    pub fn task_order(&self) -> u32 {
-        self.task_order
-    }
-    
-    /// Return the progress completed percentage. Value is always between 0 and 100. 
-    pub fn progress(&self) -> u8 {
-        self.progress
-    }
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -681,9 +645,34 @@ pub enum WsServerMessage {
 pub enum WsClientMessage {
     Start(Vec<TaskId>),
     Ready(usize),
-    Accept(TaskResult),
-    Reject(TaskResult),
-    Update(TaskProgressUpdate),
+    Accept(WorkflowRunTaskId),
+    Reject(WorkflowRunTaskId),
+    /// Percentage progress through a given task. Although the internal value is a `u8`, the actual
+    /// value is always between 0 and 100.
+    Update {
+        workflow_run_task_id: WorkflowRunTaskId,
+        progress: u8,
+    },
     Result(TaskResult),
     Close,
+}
+
+impl WsClientMessage {
+    pub fn accept(workflow_run_task: &WorkflowRunTask) -> Self {
+        Self::Accept(workflow_run_task.workflow_run_task_id.clone())
+    }
+
+    pub fn reject(workflow_run_task: WorkflowRunTask) -> Self {
+        Self::Reject(workflow_run_task.workflow_run_task_id)
+    }
+
+    /// Create a [WsClientMessage::Update] for the specified [WorkflowRunTask] with the new
+    /// `progress` completed value. Any progress supplied over 100 will be clamped to that maximum
+    /// before returning the new value.
+    pub fn update(workflow_run_task: &WorkflowRunTask, progress: u8) -> Self {
+        Self::Update {
+            workflow_run_task_id: workflow_run_task.workflow_run_task_id.clone(),
+            progress,
+        }
+    }
 }
