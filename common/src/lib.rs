@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use derive_builder::Builder;
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -473,19 +474,19 @@ impl WorkflowRun {
 
 #[derive(Serialize, Deserialize, sqlx::FromRow, Debug, Clone)]
 pub struct WorkflowRunTaskId {
-    run_id: WorkflowRunId,
+    pub run_id: WorkflowRunId,
     #[sqlx(try_from = "i32")]
-    task_order: u32,
+    pub task_order: u32,
 }
 
 #[derive(Serialize, Deserialize, sqlx::FromRow, Debug, Clone)]
 pub struct WorkflowRunTask {
     #[sqlx(flatten)]
-    workflow_run_task_id: WorkflowRunTaskId,
-    task_id: TaskId,
-    input_data: Option<serde_json::Value>,
-    output_data: Option<serde_json::Value>,
-    task_status: WorkflowRunTaskStatus,
+    pub workflow_run_task_id: WorkflowRunTaskId,
+    pub task_id: TaskId,
+    pub input_data: Option<serde_json::Value>,
+    pub output_data: Option<serde_json::Value>,
+    pub task_status: WorkflowRunTaskStatus,
 }
 
 impl WorkflowRunTask {
@@ -644,7 +645,10 @@ pub enum WsServerMessage {
 #[derive(Deserialize, Serialize, Debug)]
 pub enum WsClientMessage {
     Start(Vec<TaskId>),
-    Ready(usize),
+    Ready {
+        task_id: TaskId,
+        task_slots: usize
+    },
     Accept(WorkflowRunTaskId),
     Reject(WorkflowRunTaskId),
     /// Percentage progress through a given task. Although the internal value is a `u8`, the actual
@@ -675,4 +679,9 @@ impl WsClientMessage {
             progress,
         }
     }
+}
+
+pub fn encode_msgpack_value<T: Serialize>(value: &T) -> Result<Bytes, rmp_serde::encode::Error> {
+    let bytes = rmp_serde::encode::to_vec(&value)?;
+    Ok(Bytes::from(bytes))
 }

@@ -1,28 +1,26 @@
 use common::{
-    TaskId, TaskResult, WorkerId, WorkflowRunTask, WsClientMessage,
-    WsServerMessage,
+    TaskId, TaskResult, WorkerId, WorkflowRunTask, WsClientMessage, WsServerMessage,
+    encode_msgpack_value,
 };
 use crossbeam::{
-    channel::{unbounded, Receiver, Sender, TryRecvError},
+    channel::{Receiver, Sender, TryRecvError, unbounded},
     select,
 };
-use derive_builder::Builder;
-use serde::Serialize;
 use std::{
     collections::HashMap,
     net::TcpStream,
     sync::Arc,
-    thread::{spawn, JoinHandle},
+    thread::{JoinHandle, spawn},
     time::Duration,
 };
-use tungstenite::{connect, stream::MaybeTlsStream, Bytes, Message, WebSocket};
+use tungstenite::{Message, WebSocket, connect, stream::MaybeTlsStream};
 use uuid::Uuid;
 
 const CLEAR_TASK_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub struct Worker {
     worker_id: WorkerId,
-    runners: HashMap<TaskId, WorkflowTaskRunnerConfig>,
+    runners: Vec<WorkflowTaskRunnerConfig>,
 }
 
 impl Worker {
@@ -41,7 +39,8 @@ impl Worker {
         let runners: HashMap<TaskId, Sender<(RunningWorker, WorkflowRunTask)>> = self
             .runners
             .into_iter()
-            .map(|(task_id, config)| {
+            .map(|config| {
+                let task_id = config.task_id.clone();
                 let (sender, executor) =
                     WorkflowTaskExecutor::create(config, ws_write_sender.clone());
                 executor.start();
@@ -53,7 +52,7 @@ impl Worker {
         let (mut web_socket, _) = connect(&url).expect("");
 
         let start = WsClientMessage::Start(task_ids);
-        let bytes = match encode_value(&start) {
+        let bytes = match encode_msgpack_value(&start) {
             Ok(inner) => inner,
             Err(error) => {
                 println!("{error}");
@@ -141,7 +140,7 @@ fn process_ws_operations(
             break;
         }
 
-        let bytes = match encode_value(&message) {
+        let bytes = match encode_msgpack_value(&message) {
             Ok(inner) => inner,
             Err(error) => {
                 println!("{error}");
@@ -154,7 +153,7 @@ fn process_ws_operations(
         };
     }
 
-    let bytes = match encode_value(&WsClientMessage::Close) {
+    let bytes = match encode_msgpack_value(&WsClientMessage::Close) {
         Ok(inner) => inner,
         Err(error) => {
             println!("{error}");
@@ -168,29 +167,26 @@ fn process_ws_operations(
 
 #[derive(Default)]
 pub struct WorkerBuilder {
-    executors: HashMap<TaskId, WorkflowTaskRunnerConfig>,
+    executors: Vec<WorkflowTaskRunnerConfig>,
 }
 
 impl WorkerBuilder {
     /// Add a new [WorkflowTaskRunner] with default configuration. See [WorkflowTaskRunnerConfig]
     /// for more details of what the default attributes of a runner is
     pub fn add_runner(self, task_id: TaskId, runner: WorkflowTaskRunner) -> Self {
-        self.add_runner_with_config(
+        self.add_runner_with_config(WorkflowTaskRunnerConfig {
             task_id,
-            WorkflowTaskRunnerConfig {
-                runner,
-                task_thread_count: 1,
-            },
-        )
+            runner,
+            task_thread_count: 1,
+        })
     }
 
     /// Add a new [WorkflowTaskRunner] by supplying a full [WorkflowTaskRunnerConfig]
     pub fn add_runner_with_config(
         mut self,
-        task_id: TaskId,
         workflow_task_runner_config: WorkflowTaskRunnerConfig,
     ) -> Self {
-        self.executors.insert(task_id, workflow_task_runner_config);
+        self.executors.push(workflow_task_runner_config);
         self
     }
 
@@ -211,18 +207,45 @@ pub type WorkflowTaskRunner = fn(RunningWorker, WorkflowRunTask) -> TaskResult;
 /// Client configuration for a [WorkflowTaskRunner]. Contains the runner and it's related
 /// properties. To each the creation of these configs, there is a builder named
 /// [WorkflowTaskRunnerConfigBuilder] that contains default values for some fields.
-/// 
+///
 /// - `task_thread_count`, default = 1
-#[derive(Builder, Debug)]
-#[builder(pattern = "owned")]
 pub struct WorkflowTaskRunnerConfig {
+    task_id: TaskId,
     runner: WorkflowTaskRunner,
     /// Number of threads that this worker can spawn to handle task run requests. This should be
     /// proportional to the number of concurrent requests the worker should receive for this task
     /// and once that limit is reached, new requests sent to this worker will get a response of
     /// [WsClientMessage::Reject]
-    #[builder(default = "1")]
     task_thread_count: usize,
+}
+
+pub struct WorkflowTaskRunnerConfigBuilder {
+    task_id: TaskId,
+    runner: WorkflowTaskRunner,
+    task_thread_count: usize,
+}
+
+impl WorkflowTaskRunnerConfigBuilder {
+    pub fn new(task_id: TaskId, runner: WorkflowTaskRunner) -> WorkflowTaskRunnerConfigBuilder {
+        Self {
+            task_id,
+            runner,
+            task_thread_count: 1,
+        }
+    }
+
+    pub fn task_thread_count(&mut self, task_thread_count: usize) -> &mut Self {
+        self.task_thread_count = task_thread_count;
+        self
+    }
+    
+    pub fn build(self) -> WorkflowTaskRunnerConfig {
+        WorkflowTaskRunnerConfig {
+            task_id: self.task_id,
+            runner: self.runner,
+            task_thread_count: self.task_thread_count,
+        }
+    }
 }
 
 pub struct WorkflowTaskExecutor {
@@ -283,7 +306,10 @@ impl WorkflowTaskExecutor {
                 }
                 default(CLEAR_TASK_TIMEOUT) => {
                     self.remove_completed_tasks();
-                    let message = WsClientMessage::Ready(self.config.task_thread_count - self.running_tasks.len());
+                    let message = WsClientMessage::Ready {
+                        task_id: self.config.task_id.clone(),
+                        task_slots: self.config.task_thread_count - self.running_tasks.len()
+                    };
                     if let Err(error) = self.ws_write_sender.send(message) {
                         println!("{error}");
                         break;
@@ -315,11 +341,6 @@ impl WorkflowTaskExecutor {
             }
         }
     }
-}
-
-fn encode_value<T: Serialize>(value: &T) -> Result<Bytes, rmp_serde::encode::Error> {
-    let bytes = rmp_serde::encode::to_vec(&value)?;
-    Ok(Bytes::from(bytes))
 }
 
 pub struct RunningWorkerInner {

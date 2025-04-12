@@ -7,7 +7,5 @@ edition = "2024"
 common = { path = "../common" }
 uuid = { workspace = true }
 rmp-serde = { workspace = true }
-serde = { workspace = true }
 crossbeam = { version = "0.8.4", features = ["crossbeam-channel"] }
 tungstenite = "0.26.2"
-derive_builder = { workspace = true }
